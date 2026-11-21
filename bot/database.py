@@ -228,3 +228,14 @@ async def transition(offer_id: int, new_status: str) -> bool:
         )
         await conn.commit()
         return cur.rowcount == 1
+
+
+async def get_connection(connection_id: str) -> dict | None:
+    """Return the stored Telegram Business connection for an incoming update."""
+    async with _connect() as conn:
+        conn.row_factory = _dict_factory
+        cur = await conn.execute(
+            "SELECT * FROM business_connections WHERE connection_id = ? LIMIT 1",
+            (connection_id,),
+        )
+        return await cur.fetchone()

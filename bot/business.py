@@ -64,11 +64,12 @@ async def send_as_business(bot: Bot, connection_id: str, chat_id: int, text: str
 
 
 async def edit_as_business(bot: Bot, connection_id: str, chat_id: int, message_id: int,
-                           text: str) -> None:
+                           text: str,
+                           reply_markup: InlineKeyboardMarkup | None = None) -> None:
     await bot.edit_message_text(
         text=text,
         chat_id=chat_id,
         message_id=message_id,
         business_connection_id=connection_id,
-        reply_markup=None,
+        reply_markup=reply_markup,
     )

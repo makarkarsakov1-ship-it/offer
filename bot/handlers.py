@@ -64,6 +64,18 @@ class AccessGateMiddleware(BaseMiddleware):
         if await db.has_paid_access(user.id):
             return await handler(event, data)
 
+        if not db.is_persistent():
+            if isinstance(event, Message):
+                if event.chat.type == "private" and not (event.text and event.text.split(maxsplit=1)[0].split("@")[0] == "/start"):
+                    await event.answer("Оплата временно недоступна: администратор ещё не подключил постоянную базу данных. Не отправляй Stars, попробуй позже.")
+                return None
+            if isinstance(event, InlineQuery):
+                await event.answer([], cache_time=1, is_personal=True)
+                return None
+            if isinstance(event, CallbackQuery):
+                await event.answer("Оплата временно недоступна. Попробуй позже.", show_alert=True)
+                return None
+
         if isinstance(event, Message):
             if event.successful_payment:
                 return await handler(event, data)
@@ -316,6 +328,9 @@ async def on_access_successful_payment(message: Message):
 async def on_start(message: Message, bot: Bot, config: Config):
     user_id = message.from_user.id if message.from_user else 0
     if user_id != config.admin_id and not await db.has_paid_access(user_id):
+        if not db.is_persistent():
+            await message.answer("Оплата временно недоступна: администратор ещё не подключил постоянную базу данных. Не отправляй Stars, попробуй позже.")
+            return
         await message.answer(
             "Для использования NFT Offer требуется разовая оплата 50 Telegram Stars. "
             "После подтверждения платёж даёт постоянный доступ."
@@ -557,6 +572,12 @@ async def on_business_message(message: Message, bot: Bot, config: Config):
     # Owner's .off command is sent directly in the target Business chat.
     if sender.id == connection["user_id"]:
         if sender.id != config.admin_id and not await db.has_paid_access(sender.id):
+            if not db.is_persistent():
+                await send_as_business(
+                    bot, connection_id, message.chat.id,
+                    "Оплата временно недоступна: администратор ещё не подключил постоянную базу данных. Не отправляйте Stars."
+                )
+                return
             await send_as_business(
                 bot, connection_id, message.chat.id,
                 "Для создания предложений нужен постоянный доступ за 50 Telegram Stars. Открой личный чат с ботом, отправь /start и оплати вход."

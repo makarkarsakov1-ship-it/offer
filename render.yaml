@@ -11,7 +11,7 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: BOT_TOKEN
-        sync: false
+        value: ""
       - key: ADMIN_ID
         value: "7323296973"
       - key: DATABASE_PATH

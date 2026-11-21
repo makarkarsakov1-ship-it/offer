@@ -29,6 +29,31 @@ CREATE TABLE IF NOT EXISTS business_contacts (
 CREATE INDEX IF NOT EXISTS idx_contacts_username
     ON business_contacts (username COLLATE NOCASE);
 
+CREATE TABLE IF NOT EXISTS balances (
+    user_id INTEGER PRIMARY KEY,
+    stars INTEGER NOT NULL DEFAULT 0 CHECK (stars >= 0),
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS withdrawals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL CHECK (amount > 0),
+    details TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected')),
+    created_at TEXT NOT NULL,
+    decided_at TEXT,
+    admin_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_withdrawals_user ON withdrawals(user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS admin_states (
+    admin_id INTEGER PRIMARY KEY,
+    withdrawal_id INTEGER NOT NULL,
+    prompt_message_id INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS offers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     business_connection_id TEXT NOT NULL,
@@ -44,7 +69,8 @@ CREATE TABLE IF NOT EXISTS offers (
     status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'rejected')),
     message_id INTEGER,
     created_at TEXT NOT NULL,
-    decided_at TEXT
+    decided_at TEXT,
+    credited_at TEXT
 );
 
 DROP INDEX IF EXISTS uniq_pending_offer;
@@ -78,6 +104,9 @@ async def init_db(path: str) -> None:
         await conn.execute("PRAGMA journal_mode=WAL")
         await conn.execute("PRAGMA foreign_keys=ON")
         await conn.executescript(SCHEMA)
+        columns = await (await conn.execute("PRAGMA table_info(offers)")).fetchall()
+        if "credited_at" not in {row[1] for row in columns}:
+            await conn.execute("ALTER TABLE offers ADD COLUMN credited_at TEXT")
         await conn.commit()
     log.info("database ready at %s", path)
 
@@ -274,3 +303,126 @@ async def get_connection(connection_id: str) -> dict | None:
             (connection_id,),
         )
         return await cur.fetchone()
+
+
+async def get_balance(user_id: int) -> int:
+    async with _connect() as conn:
+        cur = await conn.execute("SELECT stars FROM balances WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+async def credit_offer_to_balance(offer_id: int, user_id: int) -> tuple[bool, int]:
+    """Credit Stars once, only for an accepted offer belonging to this recipient."""
+    async with _connect() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        cur = await conn.execute(
+            """SELECT amount, currency, recipient_id, status, credited_at
+               FROM offers WHERE id = ?""", (offer_id,)
+        )
+        offer = await cur.fetchone()
+        if (offer is None or offer[2] != user_id or offer[3] != "accepted"
+                or offer[4] is not None):
+            await conn.rollback()
+            return False, 0
+        if offer[1] != "Stars":
+            await conn.rollback()
+            return False, 0
+        amount = int(offer[0])
+        await conn.execute(
+            """INSERT INTO balances(user_id, stars, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET
+               stars = balances.stars + excluded.stars, updated_at = excluded.updated_at""",
+            (user_id, amount, _now()),
+        )
+        await conn.execute(
+            "UPDATE offers SET credited_at = ? WHERE id = ? AND credited_at IS NULL",
+            (_now(), offer_id),
+        )
+        await conn.commit()
+        cur = await conn.execute("SELECT stars FROM balances WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        return True, int(row[0])
+
+
+async def create_withdrawal(user_id: int, amount: int, details: str) -> int | None:
+    """Atomically reserve balance and create a pending withdrawal."""
+    async with _connect() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        cur = await conn.execute("SELECT stars FROM balances WHERE user_id = ?", (user_id,))
+        row = await cur.fetchone()
+        if row is None or int(row[0]) < amount:
+            await conn.rollback()
+            return None
+        await conn.execute(
+            "UPDATE balances SET stars = stars - ?, updated_at = ? WHERE user_id = ?",
+            (amount, _now(), user_id),
+        )
+        cur = await conn.execute(
+            """INSERT INTO withdrawals(user_id, amount, details, status, created_at)
+               VALUES (?, ?, ?, 'pending', ?)""",
+            (user_id, amount, details, _now()),
+        )
+        await conn.commit()
+        return cur.lastrowid
+
+
+async def get_withdrawal(withdrawal_id: int) -> dict | None:
+    async with _connect() as conn:
+        conn.row_factory = _dict_factory
+        cur = await conn.execute("SELECT * FROM withdrawals WHERE id = ?", (withdrawal_id,))
+        return await cur.fetchone()
+
+
+async def decide_withdrawal(withdrawal_id: int, status: str, reason: str | None = None) -> bool:
+    if status not in {"approved", "rejected"}:
+        raise ValueError("Invalid withdrawal status")
+    async with _connect() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        cur = await conn.execute(
+            "SELECT user_id, amount, status FROM withdrawals WHERE id = ?", (withdrawal_id,)
+        )
+        row = await cur.fetchone()
+        if row is None or row[2] != "pending":
+            await conn.rollback()
+            return False
+        await conn.execute(
+            """UPDATE withdrawals SET status = ?, decided_at = ?, admin_reason = ?
+               WHERE id = ? AND status = 'pending'""",
+            (status, _now(), reason, withdrawal_id),
+        )
+        if status == "rejected":
+            await conn.execute(
+                """INSERT INTO balances(user_id, stars, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(user_id) DO UPDATE SET
+                   stars = balances.stars + excluded.stars, updated_at = excluded.updated_at""",
+                (row[0], row[1], _now()),
+            )
+        await conn.commit()
+        return True
+
+
+async def set_admin_rejection_state(admin_id: int, withdrawal_id: int, prompt_message_id: int) -> None:
+    async with _connect() as conn:
+        await conn.execute(
+            """INSERT INTO admin_states(admin_id, withdrawal_id, prompt_message_id)
+               VALUES (?, ?, ?)
+               ON CONFLICT(admin_id) DO UPDATE SET
+               withdrawal_id = excluded.withdrawal_id,
+               prompt_message_id = excluded.prompt_message_id""",
+            (admin_id, withdrawal_id, prompt_message_id),
+        )
+        await conn.commit()
+
+
+async def get_admin_rejection_state(admin_id: int) -> dict | None:
+    async with _connect() as conn:
+        conn.row_factory = _dict_factory
+        cur = await conn.execute("SELECT * FROM admin_states WHERE admin_id = ?", (admin_id,))
+        return await cur.fetchone()
+
+
+async def clear_admin_rejection_state(admin_id: int) -> None:
+    async with _connect() as conn:
+        await conn.execute("DELETE FROM admin_states WHERE admin_id = ?", (admin_id,))
+        await conn.commit()

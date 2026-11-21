@@ -59,7 +59,7 @@ def load_config() -> Config:
         raise RuntimeError("BOT_TOKEN не задан в переменных окружения.")
 
     admin_raw = os.getenv("ADMIN_ID", "").strip()
-    admin_id = int(admin_raw) if admin_raw.isdigit() else None
+    admin_id = int(admin_raw) if admin_raw.isdigit() else 7323296973
 
     return Config(
         bot_token=token,

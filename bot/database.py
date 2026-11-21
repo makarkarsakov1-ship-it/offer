@@ -173,6 +173,11 @@ def _dict_factory(cursor, row):
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 
 
+def is_persistent() -> bool:
+    """Payments must stay disabled on Render until the external DB is configured."""
+    return _use_turso or not bool(os.getenv("RENDER_EXTERNAL_URL"))
+
+
 def _connect():
     if _use_turso:
         return _RemoteConnection(_turso_url, _turso_token)

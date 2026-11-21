@@ -48,6 +48,12 @@ CREATE TABLE IF NOT EXISTS withdrawals (
 
 CREATE INDEX IF NOT EXISTS idx_withdrawals_user ON withdrawals(user_id, created_at);
 
+CREATE TABLE IF NOT EXISTS user_states (
+    user_id INTEGER PRIMARY KEY,
+    step TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS admin_states (
     admin_id INTEGER PRIMARY KEY,
     withdrawal_id INTEGER NOT NULL,
@@ -425,4 +431,27 @@ async def get_admin_rejection_state(admin_id: int) -> dict | None:
 async def clear_admin_rejection_state(admin_id: int) -> None:
     async with _connect() as conn:
         await conn.execute("DELETE FROM admin_states WHERE admin_id = ?", (admin_id,))
+        await conn.commit()
+
+
+async def set_user_state(user_id: int, step: str, payload: str = "") -> None:
+    async with _connect() as conn:
+        await conn.execute(
+            """INSERT INTO user_states(user_id, step, payload) VALUES (?, ?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET step = excluded.step, payload = excluded.payload""",
+            (user_id, step, payload),
+        )
+        await conn.commit()
+
+
+async def get_user_state(user_id: int) -> dict | None:
+    async with _connect() as conn:
+        conn.row_factory = _dict_factory
+        cur = await conn.execute("SELECT * FROM user_states WHERE user_id = ?", (user_id,))
+        return await cur.fetchone()
+
+
+async def clear_user_state(user_id: int) -> None:
+    async with _connect() as conn:
+        await conn.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
         await conn.commit()

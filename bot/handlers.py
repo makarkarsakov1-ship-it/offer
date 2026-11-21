@@ -58,7 +58,7 @@ def parse_inline_offer_query(text: str) -> tuple[str, str, str]:
         parts = parts[1:]
     if len(parts) != 3:
         raise ValueError(
-            "Формат: NFT-ссылка сумма star|gram\\n"
+            "Формат: NFT-ссылка сумма star|gram\n"
             "Пример: https://t.me/nft/PlushPepe-123 1400 star"
         )
     url_raw, amount_raw, currency_raw = parts
@@ -187,7 +187,7 @@ async def on_inline_query(query: InlineQuery, bot: Bot, config: Config):
             description=str(exc),
             input_message_content=InputTextMessageContent(
                 message_text=(
-                    "Чтобы создать предложение, введи в строке ввода: \\n"
+                    "Чтобы создать предложение, введи в строке ввода: \n"
                     "@имя_бота https://t.me/nft/PlushPepe-123 1400 star"
                 )
             ),

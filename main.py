@@ -36,6 +36,21 @@ async def healthcheck(_: web.Request) -> web.Response:
 
 
 async def main() -> None:
+    if not os.getenv("BOT_TOKEN", "").strip():
+        log.warning("BOT_TOKEN is empty; starting health endpoint only. Add BOT_TOKEN in Render Environment and restart.")
+        app = web.Application()
+        app.router.add_get("/healthz", healthcheck)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, host="0.0.0.0", port=int(os.getenv("PORT", "10000")))
+        try:
+            await site.start()
+            log.info("health-only server listening; Telegram webhook is not active until BOT_TOKEN is set")
+            await asyncio.Event().wait()
+        finally:
+            await runner.cleanup()
+        return
+
     config = load_config()
     await db.init_db(config.database_path)
 

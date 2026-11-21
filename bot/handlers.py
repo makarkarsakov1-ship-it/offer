@@ -7,7 +7,7 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import (
     BusinessConnection, CallbackQuery, InlineQuery,
-    InlineQueryResultArticle, InputTextMessageContent, Message,
+    InlineQueryResultArticle, InputTextMessageContent, Message, ForceReply,
 )
 from aiogram.enums import ParseMode
 
@@ -22,7 +22,7 @@ from bot.business import (
     send_as_business,
 )
 from bot.config import Config, Currency, parse_amount, parse_currency
-from bot.keyboards import offer_keyboard
+from bot.keyboards import (offer_keyboard, transfer_confirm_keyboard, main_menu_keyboard, withdrawal_admin_keyboard)
 from bot.nft_parser import parse_nft_link
 
 log = logging.getLogger(__name__)
@@ -197,7 +197,160 @@ async def on_inline_query(query: InlineQuery, bot: Bot, config: Config):
 
 @router.message(CommandStart())
 async def on_start(message: Message):
-    await message.answer(START_TEXT)
+    await message.answer(START_TEXT, reply_markup=main_menu_keyboard())
+
+
+@router.message(F.chat.type == "private", F.text == "Профиль")
+async def on_profile(message: Message):
+    if message.from_user is None:
+        return
+    balance = await db.get_balance(message.from_user.id)
+    await message.answer(
+        f"👤 <b>Профиль</b>\\n\\n"
+        f"ID: <code>{message.from_user.id}</code>\\n"
+        f"Баланс: <b>{balance} ⭐</b>",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(F.chat.type == "private", F.text == "Вывести")
+async def on_withdraw_start(message: Message):
+    if message.from_user is None:
+        return
+    balance = await db.get_balance(message.from_user.id)
+    if balance <= 0:
+        await message.answer("На балансе пока нет звёзд для вывода.", reply_markup=main_menu_keyboard())
+        return
+    await db.set_user_state(message.from_user.id, "withdraw_amount")
+    await message.answer(
+        f"Укажи, сколько звёзд вывести. Доступно: <b>{balance} ⭐</b>\\n"
+        "Отправь только целое число.",
+        reply_markup=main_menu_keyboard(),
+    )
+
+
+@router.message(F.chat.type == "private", F.text)
+async def on_wallet_flow(message: Message, bot: Bot, config: Config):
+    if message.from_user is None or not message.text:
+        return
+    user_id = message.from_user.id
+
+    # Admin rejection reason must be a reply to the bot's ForceReply prompt.
+    if config.admin_id == user_id and message.reply_to_message is not None:
+        admin_state = await db.get_admin_rejection_state(user_id)
+        if admin_state and message.reply_to_message.message_id == admin_state["prompt_message_id"]:
+            reason = message.text.strip()
+            if not reason:
+                await message.answer("Причина не может быть пустой.")
+                return
+            withdrawal = await db.get_withdrawal(admin_state["withdrawal_id"])
+            if withdrawal and await db.decide_withdrawal(withdrawal["id"], "rejected", reason):
+                await bot.send_message(
+                    withdrawal["user_id"],
+                    f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
+                    f"Причина от администратора: {reason}\\n\\n"
+                    f"Сумма {withdrawal['amount']} ⭐ возвращена на баланс.",
+                )
+                await message.answer(f"Заявка #{withdrawal['id']} отклонена, баланс возвращён.")
+            else:
+                await message.answer("Эта заявка уже обработана или не найдена.")
+            await db.clear_admin_rejection_state(user_id)
+            return
+
+    state = await db.get_user_state(user_id)
+    if not state:
+        return
+
+    if state["step"] == "withdraw_amount":
+        raw = message.text.strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await message.answer("Введи целое положительное число, например 100.")
+            return
+        amount = int(raw)
+        balance = await db.get_balance(user_id)
+        if amount > balance:
+            await message.answer(f"Недостаточно звёзд. Доступно: {balance} ⭐. Введи другую сумму.")
+            return
+        await db.set_user_state(user_id, "withdraw_details", str(amount))
+        await message.answer(
+            "Теперь отправь реквизиты для вывода и способ получения одним сообщением.\\n"
+            "Например: @username или другие данные, по которым выполнить выплату."
+        )
+        return
+
+    if state["step"] == "withdraw_details":
+        details = message.text.strip()
+        if len(details) < 3:
+            await message.answer("Слишком короткие реквизиты. Отправь их ещё раз.")
+            return
+        amount = int(state["payload"])
+        withdrawal_id = await db.create_withdrawal(user_id, amount, details)
+        if withdrawal_id is None:
+            await db.clear_user_state(user_id)
+            await message.answer("Не удалось создать заявку: баланс изменился. Нажми «Вывести» ещё раз.")
+            return
+        await db.clear_user_state(user_id)
+        username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+        admin_text = (
+            f"💸 <b>Новая заявка на вывод #{withdrawal_id}</b>\\n\\n"
+            f"Пользователь: {username}\\n"
+            f"ID: <code>{user_id}</code>\\n"
+            f"Сумма: <b>{amount} ⭐</b>\\n"
+            f"Реквизиты: <code>{html.escape(details)}</code>"
+        )
+        if config.admin_id is not None:
+            await bot.send_message(
+                config.admin_id, admin_text,
+                reply_markup=withdrawal_admin_keyboard(withdrawal_id),
+            )
+        await message.answer(
+            f"✅ Заявка #{withdrawal_id} отправлена администратору.\\n"
+            f"Сумма {amount} ⭐ зарезервирована до решения.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+@router.callback_query(F.data.startswith("withdraw:"))
+async def on_withdraw_admin_action(callback: CallbackQuery, bot: Bot, config: Config):
+    if config.admin_id is None or callback.from_user.id != config.admin_id:
+        await callback.answer("Недостаточно прав.", show_alert=True)
+        return
+    try:
+        _, action, raw_id = callback.data.split(":")
+        withdrawal_id = int(raw_id)
+    except (ValueError, AttributeError):
+        await callback.answer("Некорректная заявка.", show_alert=True)
+        return
+    withdrawal = await db.get_withdrawal(withdrawal_id)
+    if withdrawal is None or withdrawal["status"] != "pending":
+        await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
+        return
+    if action == "approve":
+        if not await db.decide_withdrawal(withdrawal_id, "approved"):
+            await callback.answer("Заявка уже обработана.", show_alert=True)
+            return
+        await bot.send_message(
+            withdrawal["user_id"],
+            f"✅ Заявка на вывод #{withdrawal_id} принята администратором.\\n"
+            "Ожидай ручного выполнения выплаты.",
+        )
+        if callback.message:
+            await callback.message.edit_text(
+                callback.message.text + "\\n\\n✅ <b>Заявка принята.</b>",
+                reply_markup=None,
+            )
+        await callback.answer("Заявка принята.")
+    elif action == "reject":
+        prompt = await bot.send_message(
+            config.admin_id,
+            f"Напиши причину отклонения заявки #{withdrawal_id} ответом на это сообщение:",
+            reply_markup=ForceReply(selective=True),
+        )
+        await db.set_admin_rejection_state(config.admin_id, withdrawal_id, prompt.message_id)
+        await callback.answer("Ожидаю причину отклонения.")
+    else:
+        await callback.answer("Неизвестное действие.", show_alert=True)
+
 
 
 @router.message(F.chat.type == "private", F.text.regexp(OFF_RE))
@@ -339,6 +492,36 @@ async def on_offer_button(callback: CallbackQuery, bot: Bot, config: Config):
     elif callback.from_user.id != offer["recipient_id"]:
         await callback.answer("Ответить может только получатель предложения.", show_alert=True)
         return
+    if action == "transferred":
+        if offer["status"] != "accepted":
+            await callback.answer("Сначала нужно принять предложение.", show_alert=True)
+            return
+        if offer["currency"] != "Stars":
+            await callback.answer("Внутренний баланс пополняется только за предложения в Stars.", show_alert=True)
+            return
+        credited, balance = await db.credit_offer_to_balance(offer_id, callback.from_user.id)
+        if not credited:
+            await callback.answer("Баланс уже пополнен или предложение не подходит.", show_alert=True)
+            return
+        text = f"✅ Ваш баланс пополнился на {offer['amount']} звёзд в боте @gram_gem_bot."
+        try:
+            if inline_mode:
+                await bot.edit_message_text(
+                    inline_message_id=callback.inline_message_id,
+                    text=text,
+                    reply_markup=None,
+                    parse_mode=ParseMode.HTML,
+                )
+            elif offer["message_id"] is not None:
+                await edit_as_business(
+                    bot, offer["business_connection_id"], offer["chat_id"],
+                    offer["message_id"], text,
+                )
+        except TelegramAPIError:
+            log.exception("failed to edit transferred offer %s", offer_id)
+        await callback.answer("Баланс пополнен.")
+        return
+
     if offer["status"] != "pending":
         await callback.answer("Предложение уже обработано.", show_alert=True)
         return
@@ -364,13 +547,22 @@ async def on_offer_button(callback: CallbackQuery, bot: Bot, config: Config):
             await bot.edit_message_text(
                 inline_message_id=callback.inline_message_id,
                 text=text,
-                reply_markup=None,
+                reply_markup=(
+                    transfer_confirm_keyboard(offer_id)
+                    if new_status == "accepted" and offer["currency"] == "Stars"
+                    else None
+                ),
                 parse_mode=ParseMode.HTML,
             )
         elif offer["message_id"] is not None:
             await edit_as_business(
                 bot, offer["business_connection_id"], offer["chat_id"],
                 offer["message_id"], text,
+                reply_markup=(
+                    transfer_confirm_keyboard(offer_id)
+                    if new_status == "accepted" and offer["currency"] == "Stars"
+                    else None
+                ),
             )
     except TelegramAPIError:
         log.exception("failed to edit offer %s message", offer_id)

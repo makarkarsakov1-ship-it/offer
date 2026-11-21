@@ -12,7 +12,7 @@ def offer_keyboard(offer_id: int) -> InlineKeyboardMarkup:
 
 def transfer_confirm_keyboard(offer_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="Передал(а)", callback_data=f"offer:transferred:{offer_id}", icon_custom_emoji_id="6030839471832829491")
+        InlineKeyboardButton(text="Передал(а)", callback_data=f"offer:transferred:{offer_id}", icon_custom_emoji_id="5895669571058142797")
     ]])
 
 

@@ -15,8 +15,8 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_ID
-        sync: false
+        value: "7323296973"
       - key: DATABASE_PATH
         value: /var/data/bot.sqlite3
       - key: TRANSFER_FEE_TEXT
-        value: "Если требуется 25 Telegram Stars, они должны быть на вашем балансе."
+        value: "Telegram может запросить дополнительную комиссию в размере 25 Stars. Проверьте актуальную сумму перед подтверждением передачи."

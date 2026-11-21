@@ -201,6 +201,52 @@ async def create_offer(*, business_connection_id: str, owner_id: int, owner_user
         return cur.lastrowid
 
 
+async def create_inline_offer(*, owner_id: int, owner_username: str | None,
+                             nft_url: str, gift_name: str, gift_number: str,
+                             amount: str, currency: str) -> int:
+    """Create one pending inline offer per owner/NFT; repeated inline keystrokes reuse it."""
+    async with _connect() as conn:
+        conn.row_factory = _dict_factory
+        cur = await conn.execute(
+            """
+            SELECT id FROM offers
+            WHERE business_connection_id = 'inline' AND owner_id = ?
+              AND nft_url = ? AND status = 'pending'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (owner_id, nft_url),
+        )
+        existing = await cur.fetchone()
+        if existing is not None:
+            return int(existing["id"])
+        cur = await conn.execute(
+            """
+            INSERT INTO offers (business_connection_id, owner_id, owner_username,
+                                recipient_id, chat_id, nft_url, gift_name, gift_number,
+                                amount, currency, status, created_at)
+            VALUES ('inline', ?, ?, 0, ?, ?, ?, ?, ?, ?, 'pending', ?)
+            """,
+            (owner_id, owner_username, owner_id, nft_url, gift_name, gift_number,
+             amount, currency, _now()),
+        )
+        await conn.commit()
+        return cur.lastrowid
+
+
+async def assign_inline_recipient(offer_id: int, recipient_id: int) -> bool:
+    async with _connect() as conn:
+        cur = await conn.execute(
+            """
+            UPDATE offers SET recipient_id = ?
+            WHERE id = ? AND business_connection_id = 'inline'
+              AND recipient_id = 0 AND status = 'pending'
+            """,
+            (recipient_id, offer_id),
+        )
+        await conn.commit()
+        return cur.rowcount == 1
+
+
 async def set_message_id(offer_id: int, message_id: int) -> None:
     async with _connect() as conn:
         await conn.execute("UPDATE offers SET message_id = ? WHERE id = ?", (message_id, offer_id))

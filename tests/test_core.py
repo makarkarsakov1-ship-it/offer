@@ -63,3 +63,21 @@ def test_nft_slug_parsing():
     assert parsed.gift_name == "PlushPepe"
     assert parsed.gift_number == "123"
     assert parse_nft_link("https://t.me/nft/A-1") is None
+
+
+
+def test_parse_inline_offer_query():
+    from bot.handlers import parse_inline_offer_query
+
+    assert parse_inline_offer_query(
+        "https://t.me/nft/PlushPepe-123 1400 star"
+    ) == ("https://t.me/nft/PlushPepe-123", "1400", "star")
+    assert parse_inline_offer_query(
+        ".off https://t.me/nft/PlushPepe-123 10 gram"
+    ) == ("https://t.me/nft/PlushPepe-123", "10", "gram")
+
+
+def test_parse_inline_offer_query_rejects_fractional_stars():
+    from bot.handlers import parse_inline_offer_query
+    with pytest.raises(ValueError):
+        parse_inline_offer_query("https://t.me/nft/PlushPepe-123 1.5 star")

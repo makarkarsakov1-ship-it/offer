@@ -12,17 +12,18 @@ def mention(username: str | None, user_id: int, fallback: str) -> str:
 
 def format_offer_text(gift_name: str, gift_number: str, nft_url: str,
                       offeror_html: str, amount: str, currency_display: str) -> str:
+    price_icon = '<tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji> Telegram Stars' if "Stars" in currency_display else html.escape(currency_display)
     return (
-        f"🎁 Подарок: {html.escape(gift_name)} #{html.escape(gift_number)}\n\n"
+        f'<tg-emoji emoji-id="5773677501825945508">🎁</tg-emoji> <b>Подарок:</b> {html.escape(gift_name)} #{html.escape(gift_number)}\n\n'
         f"{html.escape(nft_url)}\n\n"
         f"Пользователь {offeror_html} предлагает вам {html.escape(amount)} "
-        f"{html.escape(currency_display)} за этот подарок."
+        f"{price_icon} за этот подарок."
     )
 
 
 def format_accepted(transfer_fee_text: str) -> str:
     return (
-        "✅ Предложение принято!\n\n"
+        '<tg-emoji emoji-id="5774022692642492953">✅</tg-emoji> <b>Предложение принято!</b>\n\n'
         "Для передачи подарка воспользуйтесь инструкцией Telegram:\n\n"
         "1. Откройте профиль и найдите соответствующий подарок.\n"
         "2. Откройте меню подарка.\n"
@@ -34,7 +35,7 @@ def format_accepted(transfer_fee_text: str) -> str:
 
 
 def format_rejected(recipient_html: str) -> str:
-    return f"❌ Предложение отклонено.\n\nПользователь {recipient_html} отменил предложение."
+    return f'<tg-emoji emoji-id="5774077015388852135">❌</tg-emoji> <b>Предложение отклонено.</b>\n\nПользователь {recipient_html} отменил предложение.'
 
 
 START_TEXT = (

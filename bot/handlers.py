@@ -5,7 +5,11 @@ import sqlite3
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
-from aiogram.types import (\n    BusinessConnection, CallbackQuery, InlineQuery,\n    InlineQueryResultArticle, InputTextMessageContent, Message,\n)\nfrom aiogram.enums import ParseMode
+from aiogram.types import (
+    BusinessConnection, CallbackQuery, InlineQuery,
+    InlineQueryResultArticle, InputTextMessageContent, Message,
+)
+from aiogram.enums import ParseMode
 
 from bot import database as db
 from bot.business import (

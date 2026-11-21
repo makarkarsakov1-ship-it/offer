@@ -1,0 +1,22 @@
+services:
+  - type: worker
+    name: nft-business-bot
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    disk:
+      name: bot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: DATABASE_PATH
+        value: /var/data/bot.sqlite3
+      - key: TRANSFER_FEE_TEXT
+        value: "Если требуется 25 Telegram Stars, они должны быть на вашем балансе."

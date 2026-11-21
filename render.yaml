@@ -1,14 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: nft-business-bot
     runtime: python
-    plan: starter
+    plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    disk:
-      name: bot-data
-      mountPath: /var/data
-      sizeGB: 1
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -17,6 +15,6 @@ services:
       - key: ADMIN_ID
         value: "7323296973"
       - key: DATABASE_PATH
-        value: /var/data/bot.sqlite3
+        value: /tmp/bot.sqlite3
       - key: TRANSFER_FEE_TEXT
         value: "Telegram может запросить дополнительную комиссию в размере 25 Stars. Проверьте актуальную сумму перед подтверждением передачи."

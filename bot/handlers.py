@@ -2,13 +2,16 @@ import html
 import logging
 import re
 import sqlite3
+import secrets
 
 from aiogram import Bot, F, Router
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.types import (
     BusinessConnection, CallbackQuery, InlineQuery,
     InlineQueryResultArticle, InputTextMessageContent, Message, ForceReply,
+    LabeledPrice, PreCheckoutQuery, InlineQueryResultsButton,
 )
 from aiogram.enums import ParseMode
 
@@ -28,6 +31,74 @@ from bot.nft_parser import parse_nft_link
 
 log = logging.getLogger(__name__)
 router = Router(name="main")
+
+ACCESS_PRICE_STARS = 50
+ACCESS_PAYMENT_PREFIX = "nft_offer_access"
+
+
+async def send_access_invoice(bot: Bot, chat_id: int, user_id: int) -> None:
+    payload = await db.get_or_create_access_intent(
+        user_id, f"{ACCESS_PAYMENT_PREFIX}:{user_id}:{secrets.token_urlsafe(8)}"
+    )
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title="NFT Offer — постоянный доступ",
+        description="Разовая оплата 50 Telegram Stars. После оплаты доступ останется навсегда.",
+        payload=payload,
+        provider_token="",
+        currency="XTR",
+        prices=[LabeledPrice(label="Постоянный доступ", amount=ACCESS_PRICE_STARS)],
+    )
+
+
+class AccessGateMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+
+        config = data.get("config")
+        if config and config.admin_id == user.id:
+            return await handler(event, data)
+
+        if await db.has_paid_access(user.id):
+            return await handler(event, data)
+
+        if isinstance(event, Message):
+            if event.successful_payment:
+                return await handler(event, data)
+            if event.chat.type != "private":
+                return await handler(event, data)
+            if event.text and event.text.split(maxsplit=1)[0].split("@")[0] == "/start":
+                return await handler(event, data)
+            bot = data.get("bot") or event.bot
+            await event.answer("Для использования бота нужен разовый вход за 50 Telegram Stars.")
+            await send_access_invoice(bot, event.chat.id, user.id)
+            return None
+
+        if isinstance(event, InlineQuery):
+            await event.answer(
+                [],
+                cache_time=1,
+                is_personal=True,
+                button=InlineQueryResultsButton(text="Оплатить вход — 50 ⭐", start_parameter="pay"),
+            )
+            return None
+
+        if isinstance(event, CallbackQuery):
+            await event.answer(
+                "Доступ закрыт. Открой личный чат с ботом, отправь /start и оплати 50 ⭐. Затем нажми кнопку ещё раз.",
+                show_alert=True,
+            )
+            return None
+
+        return await handler(event, data)
+
+
+_access_gate = AccessGateMiddleware()
+router.message.outer_middleware(_access_gate)
+router.inline_query.outer_middleware(_access_gate)
+router.callback_query.outer_middleware(_access_gate)
 
 OFF_RE = re.compile(r"^(?:\.off|/off)(?:\s|$)", re.IGNORECASE)
 CHAT_FORMAT_ERROR = (
@@ -148,10 +219,6 @@ async def create_and_send_offer(
 
 @router.inline_query()
 async def on_inline_query(query: InlineQuery, bot: Bot, config: Config):
-    if config.admin_id is not None and query.from_user.id != config.admin_id:
-        await query.answer([], cache_time=1, is_personal=True)
-        return
-
     try:
         url_raw, amount, currency_code = parse_inline_offer_query(query.query)
         nft = parse_nft_link(url_raw)
@@ -196,8 +263,65 @@ async def on_inline_query(query: InlineQuery, bot: Bot, config: Config):
         await query.answer([result], cache_time=0, is_personal=True)
 
 
+@router.pre_checkout_query()
+async def on_access_pre_checkout(query: PreCheckoutQuery):
+    payload = query.invoice_payload
+    valid_payload = payload.startswith(f"{ACCESS_PAYMENT_PREFIX}:{query.from_user.id}:")
+    if (
+        not valid_payload
+        or query.currency != "XTR"
+        or query.total_amount != ACCESS_PRICE_STARS
+        or await db.has_paid_access(query.from_user.id)
+        or not await db.is_access_intent_pending(payload, query.from_user.id)
+    ):
+        await query.answer(
+            ok=False,
+            error_message="Счёт недействителен или доступ уже оплачен. Отправь /start для нового счёта.",
+        )
+        return
+    await query.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_access_successful_payment(message: Message):
+    user = message.from_user
+    payment = message.successful_payment
+    if user is None or payment is None:
+        return
+    payload = payment.invoice_payload
+    if (
+        not payload.startswith(f"{ACCESS_PAYMENT_PREFIX}:{user.id}:")
+        or payment.currency != "XTR"
+        or payment.total_amount != ACCESS_PRICE_STARS
+    ):
+        log.error("invalid access payment payload/details from user %s", user.id)
+        await message.answer("Платёж получен, но данные счёта не совпали. Напиши администратору.")
+        return
+    granted = await db.complete_access_payment(
+        user.id, payload, payment.telegram_payment_charge_id
+    )
+    if granted:
+        await message.answer(
+            "Оплата подтверждена. Постоянный доступ к NFT Offer активирован.",
+            reply_markup=main_menu_keyboard(),
+        )
+        await message.answer(START_TEXT, reply_markup=main_menu_keyboard())
+    else:
+        await message.answer(
+            "Не удалось автоматически подтвердить доступ. Не оплачивай повторно — обратись к администратору."
+        )
+
+
 @router.message(CommandStart())
-async def on_start(message: Message):
+async def on_start(message: Message, bot: Bot, config: Config):
+    user_id = message.from_user.id if message.from_user else 0
+    if user_id != config.admin_id and not await db.has_paid_access(user_id):
+        await message.answer(
+            "Для использования NFT Offer требуется разовая оплата 50 Telegram Stars. "
+            "После подтверждения платёж даёт постоянный доступ."
+        )
+        await send_access_invoice(bot, message.chat.id, user_id)
+        return
     await message.answer(START_TEXT, reply_markup=main_menu_keyboard())
 
 
@@ -420,7 +544,7 @@ async def on_business_connection(connection: BusinessConnection):
 
 
 @router.business_message(F.chat.type == "private", F.from_user)
-async def on_business_message(message: Message, bot: Bot):
+async def on_business_message(message: Message, bot: Bot, config: Config):
     connection_id = message.business_connection_id
     sender = message.from_user
     if not connection_id or sender is None or message.chat.type != "private":
@@ -432,6 +556,12 @@ async def on_business_message(message: Message, bot: Bot):
 
     # Owner's .off command is sent directly in the target Business chat.
     if sender.id == connection["user_id"]:
+        if sender.id != config.admin_id and not await db.has_paid_access(sender.id):
+            await send_as_business(
+                bot, connection_id, message.chat.id,
+                "Для создания предложений нужен постоянный доступ за 50 Telegram Stars. Открой личный чат с ботом, отправь /start и оплати вход."
+            )
+            return
         if not message.text or not OFF_RE.match(message.text.strip()):
             return
         try:

@@ -5,7 +5,7 @@ import sqlite3
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
-from aiogram.types import BusinessConnection, CallbackQuery, Message
+from aiogram.types import (\n    BusinessConnection, CallbackQuery, InlineQuery,\n    InlineQueryResultArticle, InputTextMessageContent, Message,\n)\nfrom aiogram.enums import ParseMode
 
 from bot import database as db
 from bot.business import (
@@ -46,6 +46,26 @@ def parse_off_command(text: str) -> tuple[str, str, str, str]:
     if not recipient.startswith("@") and not recipient.isdigit():
         raise ValueError("❌ Получатель должен быть указан как @username или числовой Telegram ID.")
     return recipient, url, amount_raw, currency_raw
+
+
+def parse_inline_offer_query(text: str) -> tuple[str, str, str]:
+    parts = text.strip().split()
+    if parts and parts[0].lower() in {".off", "/off"}:
+        parts = parts[1:]
+    if len(parts) != 3:
+        raise ValueError(
+            "Формат: NFT-ссылка сумма star|gram\\n"
+            "Пример: https://t.me/nft/PlushPepe-123 1400 star"
+        )
+    url_raw, amount_raw, currency_raw = parts
+    nft = parse_nft_link(url_raw)
+    if nft is None:
+        raise ValueError("Неверная NFT-ссылка. Нужен формат https://t.me/nft/Название-Номер.")
+    amount = parse_amount(amount_raw)
+    currency = parse_currency(currency_raw)
+    if currency.code == "Stars" and "." in amount:
+        raise ValueError("Telegram Stars указываются целым числом.")
+    return nft.url, amount, currency.code
 
 
 def parse_chat_off_command(text: str) -> tuple[str, str, str]:
@@ -119,6 +139,56 @@ async def create_and_send_offer(
     await db.set_message_id(offer_id, sent.message_id)
     log.info("offer %s sent to chat %s", offer_id, chat_id)
     return True
+
+
+@router.inline_query()
+async def on_inline_query(query: InlineQuery, bot: Bot, config: Config):
+    if config.admin_id is not None and query.from_user.id != config.admin_id:
+        await query.answer([], cache_time=1, is_personal=True)
+        return
+
+    try:
+        url_raw, amount, currency_code = parse_inline_offer_query(query.query)
+        nft = parse_nft_link(url_raw)
+        currency = parse_currency(currency_code)
+        offer_id = await db.create_inline_offer(
+            owner_id=query.from_user.id,
+            owner_username=query.from_user.username,
+            nft_url=nft.url,
+            gift_name=nft.gift_name,
+            gift_number=nft.gift_number,
+            amount=amount,
+            currency=currency.code,
+        )
+        offer_text = format_offer_text(
+            nft.gift_name, nft.gift_number, nft.url,
+            mention(query.from_user.username, query.from_user.id, "владелец"),
+            amount, currency.display,
+        )
+        result = InlineQueryResultArticle(
+            id=str(offer_id),
+            title=f"Предложение: {nft.gift_name} #{nft.gift_number}",
+            description=f"{amount} {currency.display} · нажми, чтобы отправить",
+            input_message_content=InputTextMessageContent(
+                message_text=offer_text,
+                parse_mode=ParseMode.HTML,
+            ),
+            reply_markup=offer_keyboard(offer_id),
+        )
+        await query.answer([result], cache_time=0, is_personal=True)
+    except ValueError as exc:
+        result = InlineQueryResultArticle(
+            id="inline-help",
+            title="Неверный формат предложения",
+            description=str(exc),
+            input_message_content=InputTextMessageContent(
+                message_text=(
+                    "Чтобы создать предложение, введи в строке ввода: \\n"
+                    "@имя_бота https://t.me/nft/PlushPepe-123 1400 star"
+                )
+            ),
+        )
+        await query.answer([result], cache_time=0, is_personal=True)
 
 
 @router.message(CommandStart())
@@ -248,7 +318,21 @@ async def on_offer_button(callback: CallbackQuery, bot: Bot, config: Config):
     if offer is None:
         await callback.answer("Предложение не найдено.", show_alert=True)
         return
-    if callback.from_user.id != offer["recipient_id"]:
+    inline_mode = offer["business_connection_id"] == "inline"
+    if inline_mode:
+        if not callback.inline_message_id:
+            await callback.answer("Не удалось определить inline-сообщение.", show_alert=True)
+            return
+        if callback.from_user.id == offer["owner_id"]:
+            await callback.answer("Владелец не может принять собственное предложение.", show_alert=True)
+            return
+        if offer["recipient_id"] == 0:
+            await db.assign_inline_recipient(offer_id, callback.from_user.id)
+            offer = await db.get_offer(offer_id)
+        if offer["recipient_id"] != callback.from_user.id:
+            await callback.answer("Ответить может только получатель предложения.", show_alert=True)
+            return
+    elif callback.from_user.id != offer["recipient_id"]:
         await callback.answer("Ответить может только получатель предложения.", show_alert=True)
         return
     if offer["status"] != "pending":
@@ -271,14 +355,21 @@ async def on_offer_button(callback: CallbackQuery, bot: Bot, config: Config):
         await callback.answer("Предложение уже обработано.", show_alert=True)
         return
 
-    if offer["message_id"] is not None:
-        try:
+    try:
+        if inline_mode:
+            await bot.edit_message_text(
+                inline_message_id=callback.inline_message_id,
+                text=text,
+                reply_markup=None,
+                parse_mode=ParseMode.HTML,
+            )
+        elif offer["message_id"] is not None:
             await edit_as_business(
                 bot, offer["business_connection_id"], offer["chat_id"],
                 offer["message_id"], text,
             )
-        except TelegramAPIError:
-            log.exception("failed to edit offer %s message", offer_id)
+    except TelegramAPIError:
+        log.exception("failed to edit offer %s message", offer_id)
 
     await callback.answer("Готово.")
     log.info("offer %s -> %s", offer_id, new_status)

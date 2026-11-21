@@ -209,7 +209,7 @@ async def on_profile(message: Message):
     await message.answer(
         f"👤 <b>Профиль</b>\\n\\n"
         f"ID: <code>{message.from_user.id}</code>\\n"
-        f"Баланс: <b>{balance} ⭐</b>",
+        f'Баланс: <b>{balance} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji></b>',
         reply_markup=main_menu_keyboard(),
     )
 
@@ -220,7 +220,7 @@ async def on_withdraw_start(message: Message):
         return
     balance = await db.get_balance(message.from_user.id)
     if balance <= 0:
-        await message.answer("На балансе пока нет звёзд для вывода.", reply_markup=main_menu_keyboard())
+        await message.answer('На балансе пока нет звёзд для вывода <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji>.', reply_markup=main_menu_keyboard())
         return
     await db.set_user_state(message.from_user.id, "withdraw_amount")
     await message.answer(
@@ -347,7 +347,7 @@ async def on_wallet_flow(message: Message, bot: Bot, config: Config):
                     withdrawal["user_id"],
                     f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
                     f"Причина от администратора: {html.escape(reason)}\\n\\n"
-                    f"Сумма {withdrawal['amount']} ⭐ возвращена на баланс.",
+                    f'Сумма {withdrawal["amount"]} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji> возвращена на баланс.',
                 )
                 await message.answer(f"Заявка #{withdrawal['id']} отклонена, баланс возвращён.")
             else:
@@ -403,7 +403,7 @@ async def on_wallet_flow(message: Message, bot: Bot, config: Config):
             )
         await message.answer(
             f"✅ Заявка #{withdrawal_id} отправлена администратору.\\n"
-            f"Сумма {amount} ⭐ зарезервирована до решения.",
+            f'Сумма {amount} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji> зарезервирована до решения.',
             reply_markup=main_menu_keyboard(),
         )
 
@@ -504,7 +504,10 @@ async def on_offer_button(callback: CallbackQuery, bot: Bot, config: Config):
         if not credited:
             await callback.answer("Баланс уже пополнен или предложение не подходит.", show_alert=True)
             return
-        text = f"✅ Ваш баланс пополнился на {offer['amount']} звёзд в боте @gram_gem_bot."
+        text = (
+            f'<tg-emoji emoji-id="5774022692642492953">✅</tg-emoji> Ваш баланс пополнился на '
+            f'{offer["amount"]} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji> в боте @gram_gem_bot.'
+        )
         try:
             if inline_mode:
                 await bot.edit_message_text(

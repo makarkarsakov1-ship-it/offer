@@ -24,16 +24,16 @@ from bot.nft_parser import parse_nft_link
 log = logging.getLogger(__name__)
 router = Router(name="main")
 
-OFF_RE = re.compile(r"^(?:\\.off|/off)(?:\\s|$)", re.IGNORECASE)
+OFF_RE = re.compile(r"^(?:\.off|/off)(?:\s|$)", re.IGNORECASE)
 CHAT_FORMAT_ERROR = (
-    "❌ Формат команды:\\n"
-    ".off https://t.me/nft/Название-Номер сумма star|gram\\n\\n"
-    "Примеры:\\n"
-    ".off https://t.me/nft/PlushPepe-1 1400 star\\n"
+    "❌ Формат команды:\n"
+    ".off https://t.me/nft/Название-Номер сумма star|gram\n\n"
+    "Примеры:\n"
+    ".off https://t.me/nft/PlushPepe-1 1400 star\n"
     ".off https://t.me/nft/PlushPepe-1 10 gram"
 )
 PRIVATE_FORMAT_ERROR = (
-    "❌ Формат команды в личке бота:\\n"
+    "❌ Формат команды в личке бота:\n"
     ".off @username ссылка сумма star|gram"
 )
 
@@ -177,7 +177,7 @@ async def on_contacts(message: Message):
         seen.add(key)
         label = f"@{contact['username']}" if contact["username"] else str(contact["user_id"])
         lines.append(f"• {label} — ID: {contact['user_id']}")
-    await message.answer("\\n".join(lines))
+    await message.answer("\n".join(lines))
 
 
 @router.business_connection()

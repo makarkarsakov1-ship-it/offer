@@ -24,28 +24,129 @@ from bot.nft_parser import parse_nft_link
 log = logging.getLogger(__name__)
 router = Router(name="main")
 
-OFF_RE = re.compile(r"^\.off(\s|$)", re.IGNORECASE)
+OFF_RE = re.compile(r"^(?:\.off|/off)(?:\s|$)", re.IGNORECASE)
 
 FORMAT_ERROR = (
     "❌ Неправильный формат команды.\n\n"
-    "Примеры правильного формата:\n\n"
-    ".off https://t.me/nft/... 1400 star\n\n"
-    ".off https://t.me/nft/... 10 gram"
+    "Используйте:\n"
+    ".off @username ссылка сумма star|gram\n\n"
+    "Примеры:\n"
+    ".off @example https://t.me/nft/PlushPepe-1 1400 star\n"
+    ".off @example https://t.me/nft/PlushPepe-1 10 gram"
 )
 
 
-def parse_off_command(text: str) -> tuple[str, str, str]:
-    """Split '.off <link> <amount> <currency>' into raw parts. Exactly four tokens required."""
+def parse_off_command(text: str) -> tuple[str, str, str, str]:
     parts = text.split()
-    if len(parts) != 4:
+    if len(parts) != 5 or not OFF_RE.match(parts[0]):
         raise ValueError(FORMAT_ERROR)
-    _, url, amount_raw, currency_raw = parts
-    return url, amount_raw, currency_raw
+    _, recipient, url, amount_raw, currency_raw = parts
+    if not recipient.startswith("@") and not recipient.isdigit():
+        raise ValueError("❌ Получатель должен быть указан как @username или числовой Telegram ID.")
+    return recipient, url, amount_raw, currency_raw
 
 
 @router.message(CommandStart())
 async def on_start(message: Message):
     await message.answer(START_TEXT)
+
+
+@router.message(F.chat.type == "private", F.text.regexp(OFF_RE))
+async def on_private_off_command(message: Message, bot: Bot, config: Config):
+    if message.from_user is None:
+        return
+    try:
+        recipient_identifier, url_raw, amount_raw, currency_raw = parse_off_command(message.text)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    contact = await db.find_contact_for_owner(message.from_user.id, recipient_identifier)
+    if contact is None:
+        await message.answer(
+            "❌ Не удалось найти получателя среди недавних бизнес-диалогов.\n\n"
+            "Убедитесь, что этот человек уже написал вашему Telegram Business, "
+            "что бот подключён и имеет право отвечать, и что с последнего сообщения "
+            "прошло меньше 24 часов. Используйте /contacts, чтобы посмотреть найденных собеседников."
+        )
+        return
+
+    nft = parse_nft_link(url_raw)
+    if nft is None:
+        await message.answer("❌ Неверная ссылка на NFT. Ожидается формат https://t.me/nft/Название-Номер.")
+        return
+
+    try:
+        amount = parse_amount(amount_raw)
+        currency: Currency = parse_currency(currency_raw)
+    except ValueError as exc:
+        await message.answer(str(exc))
+        return
+
+    try:
+        offer_id = await db.create_offer(
+            business_connection_id=contact["connection_id"],
+            owner_id=message.from_user.id,
+            owner_username=message.from_user.username,
+            recipient_id=contact["user_id"],
+            chat_id=contact["chat_id"],
+            nft_url=nft.url,
+            gift_name=nft.gift_name,
+            gift_number=nft.gift_number,
+            amount=amount,
+            currency=currency.code,
+        )
+    except sqlite3.IntegrityError:
+        await message.answer("⚠️ Такое предложение уже активно в этом диалоге.")
+        return
+
+    offer_text = format_offer_text(
+        nft.gift_name, nft.gift_number, nft.url,
+        mention(message.from_user.username, message.from_user.id, "владелец"),
+        amount, currency.display,
+    )
+    try:
+        sent = await send_as_business(
+            bot, contact["connection_id"], contact["chat_id"],
+            offer_text, offer_keyboard(offer_id),
+        )
+    except TelegramAPIError as exc:
+        log.exception("failed to send offer %s", offer_id)
+        await db.delete_offer(offer_id)
+        await message.answer(
+            "❌ Telegram не разрешил отправить предложение. Возможно, истекло 24-часовое "
+            "окно ответа или изменились права Business-бота. Подробности есть в логах Render."
+        )
+        return
+
+    await db.set_message_id(offer_id, sent.message_id)
+    await message.answer("✅ Предложение отправлено.")
+    log.info("offer %s created for recipient %s", offer_id, contact["user_id"])
+
+
+@router.message(F.chat.type == "private", F.text == "/contacts")
+async def on_contacts(message: Message):
+    if message.from_user is None:
+        return
+    contacts = await db.list_recent_contacts(message.from_user.id)
+    if not contacts:
+        await message.answer(
+            "Пока нет сохранённых собеседников. Сначала человек должен написать "
+            "вашему подключённому Telegram Business."
+        )
+        return
+
+    lines = ["👥 Последние собеседники бизнес-аккаунта:"]
+    seen = set()
+    for contact in contacts:
+        key = (contact["user_id"], contact["username"])
+        if key in seen:
+            continue
+        seen.add(key)
+        label = f"@{contact['username']}" if contact["username"] else str(contact["user_id"])
+        lines.append(f"• {label} — ID: {contact['user_id']}")
+    lines.append("\nДля предложения используйте @username или ID из списка.")
+    await message.answer("\n".join(lines))
 
 
 @router.business_connection()
@@ -59,75 +160,26 @@ async def on_business_connection(connection: BusinessConnection):
              connection.id, connection.is_enabled, can_reply)
 
 
-@router.business_message(F.text.regexp(OFF_RE))
-async def on_off_command(message: Message, bot: Bot, config: Config):
-    conn_id = message.business_connection_id
-    conn = await db.get_connection(conn_id) if conn_id else None
-    if conn is None or not conn["is_enabled"] or not conn["can_reply"]:
-        log.warning("ignored .off: connection missing, disabled or no reply rights")
+@router.business_message(F.chat.type == "private", F.from_user)
+async def on_business_incoming_message(message: Message):
+    connection_id = message.business_connection_id
+    sender = message.from_user
+    if not connection_id or sender is None or message.chat.type != "private":
         return
 
-    if message.from_user is None or message.from_user.id != conn["user_id"]:
+    connection = await db.get_connection(connection_id)
+    if connection is None or not connection["is_enabled"]:
         return
-    if message.chat.type != "private" or message.chat.id == conn["user_id"]:
-        return
-
-    async def reply(text: str) -> None:
-        try:
-            await send_as_business(bot, conn_id, message.chat.id, text)
-        except TelegramAPIError:
-            log.exception("failed to send business reply")
-
-    try:
-        url_raw, amount_raw, currency_raw = parse_off_command(message.text)
-    except ValueError as exc:
-        await reply(str(exc))
+    if sender.id == connection["user_id"]:
         return
 
-    nft = parse_nft_link(url_raw)
-    if nft is None:
-        await reply("❌ Неверная ссылка на NFT.\n\nОжидается формат https://t.me/nft/Название-Номер.")
-        return
-
-    try:
-        amount = parse_amount(amount_raw)
-        currency: Currency = parse_currency(currency_raw)
-    except ValueError as exc:
-        await reply(str(exc))
-        return
-
-    try:
-        offer_id = await db.create_offer(
-            business_connection_id=conn_id,
-            owner_id=conn["user_id"],
-            owner_username=conn["username"],
-            recipient_id=message.chat.id,
-            chat_id=message.chat.id,
-            nft_url=nft.url,
-            gift_name=nft.gift_name,
-            gift_number=nft.gift_number,
-            amount=amount,
-            currency=currency.code,
-        )
-    except sqlite3.IntegrityError:
-        await reply("⚠️ Такое предложение уже активно в этом диалоге.")
-        return
-
-    text = format_offer_text(
-        nft.gift_name, nft.gift_number, nft.url,
-        mention(conn["username"], conn["user_id"], "владелец"),
-        amount, currency.display,
+    await db.record_business_contact(
+        connection_id=connection_id,
+        user_id=sender.id,
+        username=sender.username,
+        chat_id=message.chat.id,
     )
-    try:
-        sent = await send_as_business(bot, conn_id, message.chat.id, text, offer_keyboard(offer_id))
-    except TelegramAPIError:
-        log.exception("failed to send offer %s", offer_id)
-        await db.delete_offer(offer_id)
-        await reply("Не удалось отправить предложение. Проверьте права бота в Telegram Business.")
-        return
-
-    await db.set_message_id(offer_id, sent.message_id)
-    log.info("offer %s created", offer_id)
+    log.info("saved business contact %s in connection %s", sender.id, connection_id)
 
 
 @router.callback_query(F.data.startswith("offer:"))

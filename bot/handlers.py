@@ -230,87 +230,6 @@ async def on_withdraw_start(message: Message):
     )
 
 
-@router.message(F.chat.type == "private", F.text)
-async def on_wallet_flow(message: Message, bot: Bot, config: Config):
-    if message.from_user is None or not message.text:
-        return
-    user_id = message.from_user.id
-
-    # Admin rejection reason must be a reply to the bot's ForceReply prompt.
-    if config.admin_id == user_id and message.reply_to_message is not None:
-        admin_state = await db.get_admin_rejection_state(user_id)
-        if admin_state and message.reply_to_message.message_id == admin_state["prompt_message_id"]:
-            reason = message.text.strip()
-            if not reason:
-                await message.answer("Причина не может быть пустой.")
-                return
-            withdrawal = await db.get_withdrawal(admin_state["withdrawal_id"])
-            if withdrawal and await db.decide_withdrawal(withdrawal["id"], "rejected", reason):
-                await bot.send_message(
-                    withdrawal["user_id"],
-                    f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
-                    f"Причина от администратора: {html.escape(reason)}\\n\\n"
-                    f"Сумма {withdrawal['amount']} ⭐ возвращена на баланс.",
-                )
-                await message.answer(f"Заявка #{withdrawal['id']} отклонена, баланс возвращён.")
-            else:
-                await message.answer("Эта заявка уже обработана или не найдена.")
-            await db.clear_admin_rejection_state(user_id)
-            return
-
-    state = await db.get_user_state(user_id)
-    if not state:
-        return
-
-    if state["step"] == "withdraw_amount":
-        raw = message.text.strip()
-        if not raw.isdigit() or int(raw) <= 0:
-            await message.answer("Введи целое положительное число, например 100.")
-            return
-        amount = int(raw)
-        balance = await db.get_balance(user_id)
-        if amount > balance:
-            await message.answer(f"Недостаточно звёзд. Доступно: {balance} ⭐. Введи другую сумму.")
-            return
-        await db.set_user_state(user_id, "withdraw_details", str(amount))
-        await message.answer(
-            "Теперь отправь реквизиты для вывода и способ получения одним сообщением.\\n"
-            "Например: @username или другие данные, по которым выполнить выплату."
-        )
-        return
-
-    if state["step"] == "withdraw_details":
-        details = message.text.strip()
-        if len(details) < 3:
-            await message.answer("Слишком короткие реквизиты. Отправь их ещё раз.")
-            return
-        amount = int(state["payload"])
-        withdrawal_id = await db.create_withdrawal(user_id, amount, details)
-        if withdrawal_id is None:
-            await db.clear_user_state(user_id)
-            await message.answer("Не удалось создать заявку: баланс изменился. Нажми «Вывести» ещё раз.")
-            return
-        await db.clear_user_state(user_id)
-        username = f"@{message.from_user.username}" if message.from_user.username else "без username"
-        admin_text = (
-            f"💸 <b>Новая заявка на вывод #{withdrawal_id}</b>\\n\\n"
-            f"Пользователь: {username}\\n"
-            f"ID: <code>{user_id}</code>\\n"
-            f"Сумма: <b>{amount} ⭐</b>\\n"
-            f"Реквизиты: <code>{html.escape(details)}</code>"
-        )
-        if config.admin_id is not None:
-            await bot.send_message(
-                config.admin_id, admin_text,
-                reply_markup=withdrawal_admin_keyboard(withdrawal_id),
-            )
-        await message.answer(
-            f"✅ Заявка #{withdrawal_id} отправлена администратору.\\n"
-            f"Сумма {amount} ⭐ зарезервирована до решения.",
-            reply_markup=main_menu_keyboard(),
-        )
-
-
 @router.callback_query(F.data.startswith("withdraw:"))
 async def on_withdraw_admin_action(callback: CallbackQuery, bot: Bot, config: Config):
     if config.admin_id is None or callback.from_user.id != config.admin_id:
@@ -406,6 +325,87 @@ async def on_contacts(message: Message):
         label = f"@{contact['username']}" if contact["username"] else str(contact["user_id"])
         lines.append(f"• {label} — ID: {contact['user_id']}")
     await message.answer("\n".join(lines))
+
+
+@router.message(F.chat.type == "private", F.text)
+async def on_wallet_flow(message: Message, bot: Bot, config: Config):
+    if message.from_user is None or not message.text:
+        return
+    user_id = message.from_user.id
+
+    # Admin rejection reason must be a reply to the bot's ForceReply prompt.
+    if config.admin_id == user_id and message.reply_to_message is not None:
+        admin_state = await db.get_admin_rejection_state(user_id)
+        if admin_state and message.reply_to_message.message_id == admin_state["prompt_message_id"]:
+            reason = message.text.strip()
+            if not reason:
+                await message.answer("Причина не может быть пустой.")
+                return
+            withdrawal = await db.get_withdrawal(admin_state["withdrawal_id"])
+            if withdrawal and await db.decide_withdrawal(withdrawal["id"], "rejected", reason):
+                await bot.send_message(
+                    withdrawal["user_id"],
+                    f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
+                    f"Причина от администратора: {html.escape(reason)}\\n\\n"
+                    f"Сумма {withdrawal['amount']} ⭐ возвращена на баланс.",
+                )
+                await message.answer(f"Заявка #{withdrawal['id']} отклонена, баланс возвращён.")
+            else:
+                await message.answer("Эта заявка уже обработана или не найдена.")
+            await db.clear_admin_rejection_state(user_id)
+            return
+
+    state = await db.get_user_state(user_id)
+    if not state:
+        return
+
+    if state["step"] == "withdraw_amount":
+        raw = message.text.strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await message.answer("Введи целое положительное число, например 100.")
+            return
+        amount = int(raw)
+        balance = await db.get_balance(user_id)
+        if amount > balance:
+            await message.answer(f"Недостаточно звёзд. Доступно: {balance} ⭐. Введи другую сумму.")
+            return
+        await db.set_user_state(user_id, "withdraw_details", str(amount))
+        await message.answer(
+            "Теперь отправь реквизиты для вывода и способ получения одним сообщением.\\n"
+            "Например: @username или другие данные, по которым выполнить выплату."
+        )
+        return
+
+    if state["step"] == "withdraw_details":
+        details = message.text.strip()
+        if len(details) < 3:
+            await message.answer("Слишком короткие реквизиты. Отправь их ещё раз.")
+            return
+        amount = int(state["payload"])
+        withdrawal_id = await db.create_withdrawal(user_id, amount, details)
+        if withdrawal_id is None:
+            await db.clear_user_state(user_id)
+            await message.answer("Не удалось создать заявку: баланс изменился. Нажми «Вывести» ещё раз.")
+            return
+        await db.clear_user_state(user_id)
+        username = f"@{message.from_user.username}" if message.from_user.username else "без username"
+        admin_text = (
+            f"💸 <b>Новая заявка на вывод #{withdrawal_id}</b>\\n\\n"
+            f"Пользователь: {username}\\n"
+            f"ID: <code>{user_id}</code>\\n"
+            f"Сумма: <b>{amount} ⭐</b>\\n"
+            f"Реквизиты: <code>{html.escape(details)}</code>"
+        )
+        if config.admin_id is not None:
+            await bot.send_message(
+                config.admin_id, admin_text,
+                reply_markup=withdrawal_admin_keyboard(withdrawal_id),
+            )
+        await message.answer(
+            f"✅ Заявка #{withdrawal_id} отправлена администратору.\\n"
+            f"Сумма {amount} ⭐ зарезервирована до решения.",
+            reply_markup=main_menu_keyboard(),
+        )
 
 
 @router.business_connection()

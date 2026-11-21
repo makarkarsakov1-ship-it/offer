@@ -22,6 +22,7 @@ log = logging.getLogger("nft-business-bot")
 
 UPDATES = [
     "message",
+    "inline_query",
     "callback_query",
     "business_connection",
     "business_message",

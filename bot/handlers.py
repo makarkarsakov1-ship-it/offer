@@ -207,7 +207,7 @@ async def on_profile(message: Message):
         return
     balance = await db.get_balance(message.from_user.id)
     await message.answer(
-        f"👤 <b>Профиль</b>\\n\\n"
+        f'<tg-emoji emoji-id="6035084557378654059">👤</tg-emoji> <b>Профиль</b>\\n\\n'
         f"ID: <code>{message.from_user.id}</code>\\n"
         f'Баланс: <b>{balance} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji></b>',
         reply_markup=main_menu_keyboard(),
@@ -224,7 +224,7 @@ async def on_withdraw_start(message: Message):
         return
     await db.set_user_state(message.from_user.id, "withdraw_amount")
     await message.answer(
-        f"Укажи, сколько звёзд вывести. Доступно: <b>{balance} ⭐</b>\\n"
+        f'Укажи, сколько звёзд вывести. Доступно: <b>{balance} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji></b>\\n'
         "Отправь только целое число.",
         reply_markup=main_menu_keyboard(),
     )
@@ -345,7 +345,7 @@ async def on_wallet_flow(message: Message, bot: Bot, config: Config):
             if withdrawal and await db.decide_withdrawal(withdrawal["id"], "rejected", reason):
                 await bot.send_message(
                     withdrawal["user_id"],
-                    f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
+                    f'<tg-emoji emoji-id="5774077015388852135">❌</tg-emoji> Заявка на вывод #{withdrawal["id"]} отклонена.\\n'
                     f"Причина от администратора: {html.escape(reason)}\\n\\n"
                     f'Сумма {withdrawal["amount"]} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji> возвращена на баланс.',
                 )
@@ -390,10 +390,10 @@ async def on_wallet_flow(message: Message, bot: Bot, config: Config):
         await db.clear_user_state(user_id)
         username = f"@{message.from_user.username}" if message.from_user.username else "без username"
         admin_text = (
-            f"💸 <b>Новая заявка на вывод #{withdrawal_id}</b>\\n\\n"
+            f'<tg-emoji emoji-id="5904359114531675993">💰</tg-emoji> <b>Новая заявка на вывод #{withdrawal_id}</b>\\n\\n'
             f"Пользователь: {username}\\n"
             f"ID: <code>{user_id}</code>\\n"
-            f"Сумма: <b>{amount} ⭐</b>\\n"
+            f'Сумма: <b>{amount} <tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji></b>\\n'
             f"Реквизиты: <code>{html.escape(details)}</code>"
         )
         if config.admin_id is not None:

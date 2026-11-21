@@ -25,25 +25,106 @@ log = logging.getLogger(__name__)
 router = Router(name="main")
 
 OFF_RE = re.compile(r"^(?:\.off|/off)(?:\s|$)", re.IGNORECASE)
+CHAT_FORMAT_ERROR = (
+    "❌ Формат команды:
+"
+    ".off https://t.me/nft/Название-Номер сумма star|gram
 
-FORMAT_ERROR = (
-    "❌ Неправильный формат команды.\n\n"
-    "Используйте:\n"
-    ".off @username ссылка сумма star|gram\n\n"
-    "Примеры:\n"
-    ".off @example https://t.me/nft/PlushPepe-1 1400 star\n"
-    ".off @example https://t.me/nft/PlushPepe-1 10 gram"
+"
+    "Примеры:
+"
+    ".off https://t.me/nft/PlushPepe-1 1400 star
+"
+    ".off https://t.me/nft/PlushPepe-1 10 gram"
+)
+PRIVATE_FORMAT_ERROR = (
+    "❌ Формат команды в личке бота:
+"
+    ".off @username ссылка сумма star|gram"
 )
 
 
 def parse_off_command(text: str) -> tuple[str, str, str, str]:
     parts = text.split()
     if len(parts) != 5 or not OFF_RE.match(parts[0]):
-        raise ValueError(FORMAT_ERROR)
+        raise ValueError(PRIVATE_FORMAT_ERROR)
     _, recipient, url, amount_raw, currency_raw = parts
     if not recipient.startswith("@") and not recipient.isdigit():
         raise ValueError("❌ Получатель должен быть указан как @username или числовой Telegram ID.")
     return recipient, url, amount_raw, currency_raw
+
+
+def parse_chat_off_command(text: str) -> tuple[str, str, str]:
+    parts = text.split()
+    if len(parts) != 4 or not OFF_RE.match(parts[0]):
+        raise ValueError(CHAT_FORMAT_ERROR)
+    return parts[1], parts[2], parts[3]
+
+
+async def create_and_send_offer(
+    *, bot: Bot, connection_id: str, owner_id: int, owner_username: str | None,
+    chat_id: int, recipient_id: int, url_raw: str, amount_raw: str,
+    currency_raw: str, error_chat_id: int | None = None,
+) -> bool:
+    nft = parse_nft_link(url_raw)
+    if nft is None:
+        error = "❌ Неверная ссылка на NFT. Ожидается https://t.me/nft/Название-Номер."
+        if error_chat_id is not None:
+            await send_as_business(bot, connection_id, error_chat_id, error)
+        return False
+
+    try:
+        amount = parse_amount(amount_raw)
+        currency: Currency = parse_currency(currency_raw)
+        if currency.code == "Stars" and "." in amount:
+            raise ValueError("❌ Telegram Stars указываются целым числом, например 1400.")
+    except ValueError as exc:
+        if error_chat_id is not None:
+            await send_as_business(bot, connection_id, error_chat_id, str(exc))
+        return False
+
+    try:
+        offer_id = await db.create_offer(
+            business_connection_id=connection_id,
+            owner_id=owner_id,
+            owner_username=owner_username,
+            recipient_id=recipient_id,
+            chat_id=chat_id,
+            nft_url=nft.url,
+            gift_name=nft.gift_name,
+            gift_number=nft.gift_number,
+            amount=amount,
+            currency=currency.code,
+        )
+    except sqlite3.IntegrityError:
+        if error_chat_id is not None:
+            await send_as_business(bot, connection_id, error_chat_id,
+                                   "⚠️ В этом диалоге уже есть активное предложение для этой NFT.")
+        return False
+
+    offer_text = format_offer_text(
+        nft.gift_name, nft.gift_number, nft.url,
+        mention(owner_username, owner_id, "владелец"),
+        amount, currency.display,
+    )
+    try:
+        sent = await send_as_business(
+            bot, connection_id, chat_id, offer_text, offer_keyboard(offer_id)
+        )
+    except TelegramAPIError:
+        log.exception("failed to send offer %s", offer_id)
+        await db.delete_offer(offer_id)
+        if error_chat_id is not None:
+            await send_as_business(
+                bot, connection_id, error_chat_id,
+                "❌ Telegram не разрешил отправить предложение. Проверь права Business-бота "
+                "и 24-часовое окно ответа. Подробности — в логах Render."
+            )
+        return False
+
+    await db.set_message_id(offer_id, sent.message_id)
+    log.info("offer %s sent to chat %s", offer_id, chat_id)
+    return True
 
 
 @router.message(CommandStart())
@@ -64,66 +145,24 @@ async def on_private_off_command(message: Message, bot: Bot, config: Config):
     contact = await db.find_contact_for_owner(message.from_user.id, recipient_identifier)
     if contact is None:
         await message.answer(
-            "❌ Не удалось найти получателя среди недавних бизнес-диалогов.\n\n"
-            "Убедитесь, что этот человек уже написал вашему Telegram Business, "
-            "что бот подключён и имеет право отвечать, и что с последнего сообщения "
-            "прошло меньше 24 часов. Используйте /contacts, чтобы посмотреть найденных собеседников."
+            "❌ Получатель не найден среди недавних бизнес-диалогов. "
+            "Проверь /contacts и убедись, что человек недавно писал Business-аккаунту."
         )
         return
 
-    nft = parse_nft_link(url_raw)
-    if nft is None:
-        await message.answer("❌ Неверная ссылка на NFT. Ожидается формат https://t.me/nft/Название-Номер.")
-        return
-
-    try:
-        amount = parse_amount(amount_raw)
-        currency: Currency = parse_currency(currency_raw)
-        if currency.code == "Stars" and "." in amount:
-            raise ValueError("❌ Telegram Stars указываются целым числом, например 1400.")
-    except ValueError as exc:
-        await message.answer(str(exc))
-        return
-
-    try:
-        offer_id = await db.create_offer(
-            business_connection_id=contact["connection_id"],
-            owner_id=message.from_user.id,
-            owner_username=message.from_user.username,
-            recipient_id=contact["user_id"],
-            chat_id=contact["chat_id"],
-            nft_url=nft.url,
-            gift_name=nft.gift_name,
-            gift_number=nft.gift_number,
-            amount=amount,
-            currency=currency.code,
-        )
-    except sqlite3.IntegrityError:
-        await message.answer("⚠️ Такое предложение уже активно в этом диалоге.")
-        return
-
-    offer_text = format_offer_text(
-        nft.gift_name, nft.gift_number, nft.url,
-        mention(message.from_user.username, message.from_user.id, "владелец"),
-        amount, currency.display,
+    ok = await create_and_send_offer(
+        bot=bot,
+        connection_id=contact["connection_id"],
+        owner_id=message.from_user.id,
+        owner_username=message.from_user.username,
+        chat_id=contact["chat_id"],
+        recipient_id=contact["user_id"],
+        url_raw=url_raw,
+        amount_raw=amount_raw,
+        currency_raw=currency_raw,
     )
-    try:
-        sent = await send_as_business(
-            bot, contact["connection_id"], contact["chat_id"],
-            offer_text, offer_keyboard(offer_id),
-        )
-    except TelegramAPIError as exc:
-        log.exception("failed to send offer %s", offer_id)
-        await db.delete_offer(offer_id)
-        await message.answer(
-            "❌ Telegram не разрешил отправить предложение. Возможно, истекло 24-часовое "
-            "окно ответа или изменились права Business-бота. Подробности есть в логах Render."
-        )
-        return
-
-    await db.set_message_id(offer_id, sent.message_id)
-    await message.answer("✅ Предложение отправлено.")
-    log.info("offer %s created for recipient %s", offer_id, contact["user_id"])
+    if ok:
+        await message.answer("✅ Предложение отправлено в бизнес-чат.")
 
 
 @router.message(F.chat.type == "private", F.text == "/contacts")
@@ -132,10 +171,7 @@ async def on_contacts(message: Message):
         return
     contacts = await db.list_recent_contacts(message.from_user.id)
     if not contacts:
-        await message.answer(
-            "Пока нет сохранённых собеседников. Сначала человек должен написать "
-            "вашему подключённому Telegram Business."
-        )
+        await message.answer("Пока нет сохранённых собеседников. Сначала человек должен написать вашему Business.")
         return
 
     lines = ["👥 Последние собеседники бизнес-аккаунта:"]
@@ -147,7 +183,6 @@ async def on_contacts(message: Message):
         seen.add(key)
         label = f"@{contact['username']}" if contact["username"] else str(contact["user_id"])
         lines.append(f"• {label} — ID: {contact['user_id']}")
-    lines.append("\nДля предложения используйте @username или ID из списка.")
     await message.answer("\n".join(lines))
 
 
@@ -163,7 +198,7 @@ async def on_business_connection(connection: BusinessConnection):
 
 
 @router.business_message(F.chat.type == "private", F.from_user)
-async def on_business_incoming_message(message: Message):
+async def on_business_message(message: Message, bot: Bot):
     connection_id = message.business_connection_id
     sender = message.from_user
     if not connection_id or sender is None or message.chat.type != "private":
@@ -172,9 +207,32 @@ async def on_business_incoming_message(message: Message):
     connection = await db.get_connection(connection_id)
     if connection is None or not connection["is_enabled"]:
         return
+
+    # Owner's .off command is sent directly in the target Business chat.
     if sender.id == connection["user_id"]:
+        if not message.text or not OFF_RE.match(message.text.strip()):
+            return
+        try:
+            url_raw, amount_raw, currency_raw = parse_chat_off_command(message.text.strip())
+        except ValueError as exc:
+            await send_as_business(bot, connection_id, message.chat.id, str(exc))
+            return
+
+        await create_and_send_offer(
+            bot=bot,
+            connection_id=connection_id,
+            owner_id=sender.id,
+            owner_username=sender.username,
+            chat_id=message.chat.id,
+            recipient_id=message.chat.id,
+            url_raw=url_raw,
+            amount_raw=amount_raw,
+            currency_raw=currency_raw,
+            error_chat_id=message.chat.id,
+        )
         return
 
+    # Messages from the other participant are stored for the optional /contacts flow.
     await db.record_business_contact(
         connection_id=connection_id,
         user_id=sender.id,

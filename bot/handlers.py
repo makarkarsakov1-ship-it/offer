@@ -1,3 +1,4 @@
+import html
 import logging
 import re
 import sqlite3
@@ -248,7 +249,7 @@ async def on_wallet_flow(message: Message, bot: Bot, config: Config):
                 await bot.send_message(
                     withdrawal["user_id"],
                     f"❌ Заявка на вывод #{withdrawal['id']} отклонена.\\n"
-                    f"Причина от администратора: {reason}\\n\\n"
+                    f"Причина от администратора: {html.escape(reason)}\\n\\n"
                     f"Сумма {withdrawal['amount']} ⭐ возвращена на баланс.",
                 )
                 await message.answer(f"Заявка #{withdrawal['id']} отклонена, баланс возвращён.")

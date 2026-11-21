@@ -65,7 +65,7 @@ def parse_inline_offer_query(text: str) -> tuple[str, str, str]:
     currency = parse_currency(currency_raw)
     if currency.code == "Stars" and "." in amount:
         raise ValueError("Telegram Stars указываются целым числом.")
-    return nft.url, amount, currency.code
+    return nft.url, amount, currency_raw
 
 
 def parse_chat_off_command(text: str) -> tuple[str, str, str]:

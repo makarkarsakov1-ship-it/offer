@@ -24,22 +24,16 @@ from bot.nft_parser import parse_nft_link
 log = logging.getLogger(__name__)
 router = Router(name="main")
 
-OFF_RE = re.compile(r"^(?:\.off|/off)(?:\s|$)", re.IGNORECASE)
+OFF_RE = re.compile(r"^(?:\\.off|/off)(?:\\s|$)", re.IGNORECASE)
 CHAT_FORMAT_ERROR = (
-    "❌ Формат команды:
-"
-    ".off https://t.me/nft/Название-Номер сумма star|gram
-
-"
-    "Примеры:
-"
-    ".off https://t.me/nft/PlushPepe-1 1400 star
-"
+    "❌ Формат команды:\\n"
+    ".off https://t.me/nft/Название-Номер сумма star|gram\\n\\n"
+    "Примеры:\\n"
+    ".off https://t.me/nft/PlushPepe-1 1400 star\\n"
     ".off https://t.me/nft/PlushPepe-1 10 gram"
 )
 PRIVATE_FORMAT_ERROR = (
-    "❌ Формат команды в личке бота:
-"
+    "❌ Формат команды в личке бота:\\n"
     ".off @username ссылка сумма star|gram"
 )
 
@@ -183,7 +177,7 @@ async def on_contacts(message: Message):
         seen.add(key)
         label = f"@{contact['username']}" if contact["username"] else str(contact["user_id"])
         lines.append(f"• {label} — ID: {contact['user_id']}")
-    await message.answer("\n".join(lines))
+    await message.answer("\\n".join(lines))
 
 
 @router.business_connection()
@@ -232,7 +226,6 @@ async def on_business_message(message: Message, bot: Bot):
         )
         return
 
-    # Messages from the other participant are stored for the optional /contacts flow.
     await db.record_business_contact(
         connection_id=connection_id,
         user_id=sender.id,

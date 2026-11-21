@@ -3,10 +3,25 @@ import os
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
+import turso_serverless
 
 log = logging.getLogger(__name__)
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS paid_access (
+    user_id INTEGER PRIMARY KEY,
+    paid_at TEXT NOT NULL,
+    telegram_charge_id TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS access_payment_intents (
+    payload TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid')),
+    created_at TEXT NOT NULL,
+    telegram_charge_id TEXT
+);
+
 CREATE TABLE IF NOT EXISTS business_connections (
     connection_id TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
@@ -86,6 +101,68 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_pending_business_offer
 """
 
 _db_path: str = ""
+_turso_url = os.getenv("TURSO_DATABASE_URL", "").strip()
+_turso_token = os.getenv("TURSO_AUTH_TOKEN", "").strip()
+_use_turso = bool(_turso_url and _turso_token)
+
+
+class _RemoteCursor:
+    def __init__(self, cursor, connection):
+        self._cursor = cursor
+        self._connection = connection
+
+    @property
+    def description(self):
+        return self._cursor.description
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    def _convert(self, row):
+        factory = self._connection.row_factory
+        return factory(self, row) if row is not None and factory else row
+
+    async def fetchone(self):
+        return self._convert(self._cursor.fetchone())
+
+    async def fetchall(self):
+        return [self._convert(row) for row in self._cursor.fetchall()]
+
+
+class _RemoteConnection:
+    """Async-shaped adapter around Turso's lightweight DB-API HTTP driver."""
+
+    def __init__(self, url: str, token: str):
+        self._connection = turso_serverless.connect(url, auth_token=token)
+        self.row_factory = None
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is not None:
+                self._connection.rollback()
+        finally:
+            self._connection.close()
+
+    async def execute(self, sql, parameters=()):
+        cursor = self._connection.execute(sql, parameters or ())
+        return _RemoteCursor(cursor, self)
+
+    async def executescript(self, script):
+        self._connection.executescript(script)
+
+    async def commit(self):
+        self._connection.commit()
+
+    async def rollback(self):
+        self._connection.rollback()
 
 
 def _now() -> str:
@@ -96,7 +173,9 @@ def _dict_factory(cursor, row):
     return {col[0]: row[i] for i, col in enumerate(cursor.description)}
 
 
-def _connect() -> aiosqlite.Connection:
+def _connect():
+    if _use_turso:
+        return _RemoteConnection(_turso_url, _turso_token)
     return aiosqlite.connect(_db_path)
 
 
@@ -107,14 +186,17 @@ async def init_db(path: str) -> None:
     if directory:
         os.makedirs(directory, exist_ok=True)
     async with _connect() as conn:
-        await conn.execute("PRAGMA journal_mode=WAL")
-        await conn.execute("PRAGMA foreign_keys=ON")
+        if not _use_turso:
+            await conn.execute("PRAGMA journal_mode=WAL")
+            await conn.execute("PRAGMA foreign_keys=ON")
         await conn.executescript(SCHEMA)
         columns = await (await conn.execute("PRAGMA table_info(offers)")).fetchall()
         if "credited_at" not in {row[1] for row in columns}:
             await conn.execute("ALTER TABLE offers ADD COLUMN credited_at TEXT")
         await conn.commit()
-    log.info("database ready at %s", path)
+    log.info("database ready: %s", "Turso Cloud" if _use_turso else path)
+    if not _use_turso:
+        log.warning("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN are empty; using local SQLite, which is ephemeral on Render Free.")
 
 
 async def upsert_connection(connection_id: str, user_id: int, username: str | None,
@@ -455,3 +537,73 @@ async def clear_user_state(user_id: int) -> None:
     async with _connect() as conn:
         await conn.execute("DELETE FROM user_states WHERE user_id = ?", (user_id,))
         await conn.commit()
+
+
+
+async def has_paid_access(user_id: int) -> bool:
+    async with _connect() as conn:
+        cur = await conn.execute("SELECT 1 FROM paid_access WHERE user_id = ? LIMIT 1", (user_id,))
+        return await cur.fetchone() is not None
+
+
+async def get_or_create_access_intent(user_id: int, new_payload: str) -> str:
+    async with _connect() as conn:
+        cur = await conn.execute(
+            "SELECT payload FROM access_payment_intents WHERE user_id = ? AND status = 'pending' ORDER BY created_at DESC LIMIT 1",
+            (user_id,),
+        )
+        row = await cur.fetchone()
+        if row:
+            return str(row[0])
+        await conn.execute(
+            "INSERT INTO access_payment_intents(payload, user_id, status, created_at) VALUES (?, ?, 'pending', ?)",
+            (new_payload, user_id, _now()),
+        )
+        await conn.commit()
+        return new_payload
+
+
+async def is_access_intent_pending(payload: str, user_id: int) -> bool:
+    async with _connect() as conn:
+        cur = await conn.execute(
+            "SELECT 1 FROM access_payment_intents WHERE payload = ? AND user_id = ? AND status = 'pending' LIMIT 1",
+            (payload, user_id),
+        )
+        return await cur.fetchone() is not None
+
+
+async def complete_access_payment(user_id: int, payload: str, charge_id: str) -> bool:
+    """Grant permanent access once, only for a matching pending Telegram Stars invoice."""
+    async with _connect() as conn:
+        await conn.execute("BEGIN IMMEDIATE")
+        cur = await conn.execute(
+            "SELECT user_id, status FROM access_payment_intents WHERE payload = ?",
+            (payload,),
+        )
+        intent = await cur.fetchone()
+        if intent is None or int(intent[0]) != user_id or intent[1] != "pending":
+            await conn.rollback()
+            return await has_paid_access(user_id)
+        cur = await conn.execute(
+            "SELECT 1 FROM paid_access WHERE user_id = ? LIMIT 1",
+            (user_id,),
+        )
+        already_paid = await cur.fetchone() is not None
+        if not already_paid:
+            cur = await conn.execute(
+                "SELECT 1 FROM paid_access WHERE telegram_charge_id = ? LIMIT 1",
+                (charge_id,),
+            )
+            if await cur.fetchone() is not None:
+                await conn.rollback()
+                return False
+            await conn.execute(
+                "INSERT INTO paid_access(user_id, paid_at, telegram_charge_id) VALUES (?, ?, ?)",
+                (user_id, _now(), charge_id),
+            )
+        await conn.execute(
+            "UPDATE access_payment_intents SET status = 'paid', telegram_charge_id = ? WHERE payload = ? AND status = 'pending'",
+            (charge_id, payload),
+        )
+        await conn.commit()
+        return True

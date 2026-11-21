@@ -24,6 +24,7 @@ UPDATES = [
     "message",
     "inline_query",
     "callback_query",
+    "pre_checkout_query",
     "business_connection",
     "business_message",
     "edited_business_message",

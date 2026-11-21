@@ -79,6 +79,8 @@ async def on_private_off_command(message: Message, bot: Bot, config: Config):
     try:
         amount = parse_amount(amount_raw)
         currency: Currency = parse_currency(currency_raw)
+        if currency.code == "Stars" and "." in amount:
+            raise ValueError("❌ Telegram Stars указываются целым числом, например 1400.")
     except ValueError as exc:
         await message.answer(str(exc))
         return

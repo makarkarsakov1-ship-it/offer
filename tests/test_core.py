@@ -81,3 +81,33 @@ def test_parse_inline_offer_query_rejects_fractional_stars():
     from bot.handlers import parse_inline_offer_query
     with pytest.raises(ValueError):
         parse_inline_offer_query("https://t.me/nft/PlushPepe-123 1.5 star")
+
+
+
+def test_internal_stars_credit_and_withdrawal_refund(tmp_path):
+    import asyncio
+    from bot import database as db
+
+    async def scenario():
+        await db.init_db(str(tmp_path / "wallet.sqlite3"))
+        offer_id = await db.create_inline_offer(
+            owner_id=111, owner_username="seller",
+            nft_url="https://t.me/nft/PlushPepe-123",
+            gift_name="PlushPepe", gift_number="123",
+            amount="150", currency="Stars",
+        )
+        assert await db.assign_inline_recipient(offer_id, 222)
+        assert await db.transition(offer_id, "accepted")
+        credited, balance = await db.credit_offer_to_balance(offer_id, 222)
+        assert credited is True
+        assert balance == 150
+        credited_again, _ = await db.credit_offer_to_balance(offer_id, 222)
+        assert credited_again is False
+
+        withdrawal_id = await db.create_withdrawal(222, 50, "@wallet")
+        assert withdrawal_id is not None
+        assert await db.get_balance(222) == 100
+        assert await db.decide_withdrawal(withdrawal_id, "rejected", "Invalid details")
+        assert await db.get_balance(222) == 150
+
+    asyncio.run(scenario())

@@ -66,7 +66,9 @@ class AccessGateMiddleware(BaseMiddleware):
 
         if not db.is_persistent():
             if isinstance(event, Message):
-                if event.chat.type == "private" and not (event.text and event.text.split(maxsplit=1)[0].split("@")[0] == "/start"):
+                if event.text and event.text.split(maxsplit=1)[0].split("@")[0] == "/start":
+                    return await handler(event, data)
+                if event.chat.type == "private":
                     await event.answer("Оплата временно недоступна: администратор ещё не подключил постоянную базу данных. Не отправляй Stars, попробуй позже.")
                 return None
             if isinstance(event, InlineQuery):

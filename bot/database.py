@@ -208,7 +208,6 @@ async def create_inline_offer(*, owner_id: int, owner_username: str | None,
                              amount: str, currency: str) -> int:
     """Create an offer for an inline result. Each result keeps its own terms."""
     async with _connect() as conn:
-        async with _connect() as conn:
         cur = await conn.execute(
             """
             INSERT INTO offers (business_connection_id, owner_id, owner_username,

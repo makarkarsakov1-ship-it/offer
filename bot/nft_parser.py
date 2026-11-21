@@ -5,7 +5,7 @@ from dataclasses import dataclass
 # Telegram Bot API has no method that looks up a gift by its link, so nothing
 # here is verified against Telegram.
 NFT_RE = re.compile(
-    r"^(?:https?://)?(?:www\\.)?(?:t\\.me|telegram\\.me)/nft/([A-Za-z][A-Za-z0-9]{2,63})-(\\d{1,12})/?(?:[?#].*)?$",
+    r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/nft/([A-Za-z][A-Za-z0-9]{2,63})-(\d{1,12})/?(?:[?#].*)?$",
     re.IGNORECASE,
 )
 
